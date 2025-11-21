@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # Linux
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: bashtion-linux-x86_64.tar.gz
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            name: bashtion-linux-aarch64.tar.gz
+          
+          # macOS
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: bashtion-macos-x86_64.tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: bashtion-macos-aarch64.tar.gz
+          
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+
+    - name: Install cross for musl targets
+      if: contains(matrix.target, 'linux-musl')
+      run: cargo install cross --git https://github.com/cross-rs/cross
+
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build binary (cross for musl)
+      if: contains(matrix.target, 'linux-musl')
+      run: cross build --release --target ${{ matrix.target }}
+
+    - name: Build binary (cargo for others)
+      if: "!contains(matrix.target, 'linux-musl')"
+      run: cargo build --release --target ${{ matrix.target }}
+
+    - name: Strip binary (unix)
+      if: "!contains(matrix.target, 'linux-musl')"
+      run: strip target/${{ matrix.target }}/release/bashtion
+
+    - name: Create archive
+      run: |
+        cd target/${{ matrix.target }}/release
+        tar czf ../../../${{ matrix.name }} bashtion
+        cd -
+
+    - name: Generate SHA256 checksum
+      run: |
+        shasum -a 256 ${{ matrix.name }} > ${{ matrix.name }}.sha256
+      shell: bash
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.name }}
+        path: |
+          ${{ matrix.name }}
+          ${{ matrix.name }}.sha256
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        merge-multiple: true
+
+    - name: Extract version from tag
+      id: version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.ref_name }}
+        name: Bashtion v${{ steps.version.outputs.VERSION }}
+        body: |
+          # Bashtion v${{ steps.version.outputs.VERSION }}
+
+          Bashtion inspects shell scripts before they reach your interpreter. Pipelines like `curl ... | bashtion` give you AI and static analysis plus a manual confirmation prompt.
+
+          ## 🚀 Quick Install
+
+          ```bash
+          curl -fsSL https://raw.githubusercontent.com/chriswessels/bashtion/${{ github.ref_name }}/install.sh | bash
+          ```
+
+          Or download a platform archive below:
+
+          - `bashtion-linux-x86_64.tar.gz`
+          - `bashtion-linux-aarch64.tar.gz`
+          - `bashtion-macos-x86_64.tar.gz`
+          - `bashtion-macos-aarch64.tar.gz`
+
+          Each archive contains a single `bashtion` (or `bashtion.exe`) binary. Extract, move it into your `$PATH`, and run `bashtion --help`.
+
+          ## 📋 Assets
+
+          All binaries are built with `cargo build --release` (musl for Linux). SHA256 checksums are included for verification.
+
+          ## 🔄 Changes
+
+          See the [commit history](https://github.com/chriswessels/bashtion/commits/${{ github.ref_name }}) for detailed changes in this release.
+        files: |
+          bashtion-*.tar.gz
+          *.sha256
+        draft: false
+        prerelease: false
