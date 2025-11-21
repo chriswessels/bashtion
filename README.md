@@ -82,7 +82,7 @@ All settings can be controlled via CLI flags or `BASHTION_*` env vars:
 | `--buffer-limit` / `BASHTION_BUFFER_LIMIT` | Max bytes read from stdin | 512 KB |
 | `BASHTION_OPENAI_BASE_URL` | OpenAI-compatible endpoint base URL | unset (AI disabled) |
 | `BASHTION_OPENAI_API_KEY` | API key for the endpoint | unset |
-| `BASHTION_OPENAI_MODEL` | Model name sent to the endpoint | `gpt-4o` |
+| `BASHTION_OPENAI_MODEL` | Model name sent to the endpoint | `gpt-5-mini` |
 
 Example:
 ```bash

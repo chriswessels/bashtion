@@ -94,7 +94,7 @@ impl ResolvedConfig {
     pub fn resolve(cli: CliConfig, env: EnvConfig) -> Result<Self, ConfigError> {
         let base_url = merge_strings(cli.base_url, env.base_url);
         let api_key = merge_strings(cli.api_key, env.api_key);
-        let model = merge_strings(cli.model, env.model).unwrap_or_else(|| "gpt-4o".to_string());
+        let model = merge_strings(cli.model, env.model).unwrap_or_else(|| "gpt-5-mini".to_string());
         let timeout_secs = cli.timeout_secs.or(env.timeout_secs).unwrap_or(30);
         let buffer_limit = cli.buffer_limit.or(env.buffer_limit).unwrap_or(500 * 1024);
         let auto_exec = cli.auto_exec.or(env.auto_exec).unwrap_or(true);
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn defaults_apply_when_missing() {
         let resolved = ResolvedConfig::resolve(CliConfig::default(), EnvConfig::default()).unwrap();
-        assert_eq!(resolved.model, "gpt-4o");
+        assert_eq!(resolved.model, "gpt-5-mini");
         assert_eq!(resolved.timeout.as_secs(), 30);
         assert_eq!(resolved.buffer_limit, 500 * 1024);
         assert!(resolved.auto_exec);
