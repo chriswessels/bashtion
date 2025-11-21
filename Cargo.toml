@@ -3,14 +3,17 @@ name = "bashtion"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+doctest = false
+
 [dependencies]
-anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 colored = "2"
 once_cell = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json_lenient = "0.2"
+llm_json = "1"
 streaming-iterator = "0.1"
 tokio = { version = "1", features = ["full"] }
 tree-sitter = "0.24"
