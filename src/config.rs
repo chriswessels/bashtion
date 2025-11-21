@@ -11,7 +11,6 @@ pub struct EnvConfig {
     pub model: Option<String>,
     pub timeout_secs: Option<u64>,
     pub buffer_limit: Option<usize>,
-    pub allow_caution: Option<bool>,
     pub auto_exec: Option<bool>,
     pub exec_shell: Option<String>,
 }
@@ -23,7 +22,6 @@ pub struct CliConfig {
     pub model: Option<String>,
     pub timeout_secs: Option<u64>,
     pub buffer_limit: Option<usize>,
-    pub allow_caution: Option<bool>,
     pub auto_exec: Option<bool>,
     pub exec_shell: Option<String>,
 }
@@ -35,7 +33,6 @@ pub struct ResolvedConfig {
     pub model: String,
     pub timeout: Duration,
     pub buffer_limit: usize,
-    pub allow_caution: bool,
     pub auto_exec: bool,
     pub exec_shell: Option<String>,
 }
@@ -87,7 +84,6 @@ impl EnvConfig {
             model: read_env_string("BASHTION_OPENAI_MODEL")?,
             timeout_secs: read_env_number("BASHTION_TIMEOUT_SECS")?,
             buffer_limit: read_env_number("BASHTION_BUFFER_LIMIT")?,
-            allow_caution: read_env_bool("BASHTION_ALLOW_CAUTION")?,
             auto_exec: read_env_bool("BASHTION_AUTO_EXEC")?,
             exec_shell: read_env_string("BASHTION_EXEC_SHELL")?,
         })
@@ -101,7 +97,6 @@ impl ResolvedConfig {
         let model = merge_strings(cli.model, env.model).unwrap_or_else(|| "gpt-4o".to_string());
         let timeout_secs = cli.timeout_secs.or(env.timeout_secs).unwrap_or(30);
         let buffer_limit = cli.buffer_limit.or(env.buffer_limit).unwrap_or(500 * 1024);
-        let allow_caution = cli.allow_caution.or(env.allow_caution).unwrap_or(false);
         let auto_exec = cli.auto_exec.or(env.auto_exec).unwrap_or(true);
         let exec_shell = merge_strings(cli.exec_shell, env.exec_shell);
 
@@ -118,7 +113,6 @@ impl ResolvedConfig {
             model,
             timeout: Duration::from_secs(timeout_secs),
             buffer_limit,
-            allow_caution,
             auto_exec,
             exec_shell,
         })
@@ -229,7 +223,6 @@ mod tests {
         assert_eq!(resolved.timeout.as_secs(), 30);
         assert_eq!(resolved.buffer_limit, 500 * 1024);
         assert!(resolved.auto_exec);
-        assert!(!resolved.allow_caution);
     }
 
     #[test]

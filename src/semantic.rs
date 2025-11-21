@@ -63,33 +63,6 @@ pub struct LlmFinding {
     pub code: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum FindingSeverity {
-    Low,
-    Medium,
-    High,
-    Unknown,
-}
-
-impl FindingSeverity {
-    pub fn from_str(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "low" => FindingSeverity::Low,
-            "medium" | "med" => FindingSeverity::Medium,
-            "high" | "critical" => FindingSeverity::High,
-            _ => FindingSeverity::Unknown,
-        }
-    }
-}
-
-pub fn max_finding_severity(verdict: &LlmVerdict) -> Option<FindingSeverity> {
-    verdict
-        .findings
-        .iter()
-        .map(|f| FindingSeverity::from_str(&f.severity))
-        .max()
-}
-
 #[derive(Serialize)]
 struct ChatMessage<'a> {
     role: &'a str,
@@ -490,29 +463,5 @@ mod tests {
         assert!(!verdict.safe);
         assert_eq!(verdict.findings.len(), 1);
         assert_eq!(verdict.findings[0].title, "Issue");
-    }
-
-    #[test]
-    fn maps_max_finding_severity() {
-        let verdict = LlmVerdict {
-            safe: false,
-            summary: "bad".into(),
-            findings: vec![
-                LlmFinding {
-                    title: "curl".into(),
-                    severity: "low".into(),
-                    explanation: String::new(),
-                    code: String::new(),
-                },
-                LlmFinding {
-                    title: "chmod".into(),
-                    severity: "HIGH".into(),
-                    explanation: String::new(),
-                    code: String::new(),
-                },
-            ],
-        };
-
-        assert_eq!(max_finding_severity(&verdict), Some(FindingSeverity::High));
     }
 }

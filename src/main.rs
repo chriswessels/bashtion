@@ -42,10 +42,6 @@ struct Cli {
     #[arg(long)]
     no_color: bool,
 
-    /// Allow scripts that trigger caution (soft) rules (env: BASHTION_ALLOW_CAUTION)
-    #[arg(long, action = clap::ArgAction::SetTrue)]
-    allow_caution: bool,
-
     /// Skip auto-exec; when set, bashtion prints to stdout instead of running the script (env: BASHTION_AUTO_EXEC=false)
     #[arg(long = "no-exec", default_value_t = true, action = clap::ArgAction::SetFalse)]
     auto_exec: bool,
@@ -54,15 +50,7 @@ struct Cli {
 #[tokio::main]
 async fn main() {
     if let Err(err) = entrypoint().await {
-        match &err {
-            BashtionError::StaticBlocked(r) => {
-                eprintln!("{}", format!("[Bashtion] BLOCKED (static): {r}").red())
-            }
-            BashtionError::SemanticBlocked(r) => {
-                eprintln!("{}", format!("[Bashtion] BLOCKED (ai): {r}").red())
-            }
-            _ => eprintln!("{}", format!("[Bashtion] ERROR: {err}").yellow()),
-        }
+        eprintln!("{}", format!("[Bashtion] ERROR: {err}").red());
         std::process::exit(1);
     }
 }
@@ -79,7 +67,6 @@ async fn entrypoint() -> Result<(), BashtionError> {
         model: cli.model,
         timeout_secs: cli.timeout_secs,
         buffer_limit: cli.buffer_limit,
-        allow_caution: cli.allow_caution.then_some(true),
         auto_exec: (!cli.auto_exec).then_some(false),
         exec_shell: cli.exec_shell,
     };

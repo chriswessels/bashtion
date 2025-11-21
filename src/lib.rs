@@ -6,16 +6,15 @@ pub mod semantic;
 pub mod static_analysis;
 
 use colored::*;
-use std::io::Write;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 use config::ResolvedConfig;
 use error::BashtionError;
 use logging::log_stderr;
-use semantic::{
-    analyze as semantic_analyze, max_finding_severity, FindingSeverity, LlmFinding, LlmVerdict,
-};
-use static_analysis::{analyze as static_analyze, BlockReason, Severity, Verdict as StaticVerdict};
+use semantic::{analyze as semantic_analyze, LlmFinding, LlmVerdict};
+use static_analysis::{analyze as static_analyze, Severity as StaticSeverity, StaticFinding};
 
 pub async fn run(config: ResolvedConfig) -> Result<(), BashtionError> {
     let script = io::read_stdin_limited(config.buffer_limit)?;
@@ -24,97 +23,58 @@ pub async fn run(config: ResolvedConfig) -> Result<(), BashtionError> {
         script.len() as f64 / 1024.0
     ))?;
 
-    match static_analyze(&script)? {
-        StaticVerdict::Pass => log_stderr(
-            "[Bashtion] Static analysis passed."
-                .to_string()
-                .green()
-                .to_string(),
-        )?,
-        StaticVerdict::Flagged(BlockReason {
-            rule,
-            detail,
-            severity,
-        }) => match severity {
-            Severity::Block => {
-                log_stderr(
-                    "[Bashtion] ALERT: Static analysis failed."
-                        .to_string()
-                        .red()
-                        .to_string(),
-                )?;
-                log_stderr(
-                    format!("[Bashtion] Rule: {rule}; Reason: {detail}")
-                        .to_string()
-                        .red()
-                        .to_string(),
-                )?;
-                return Err(BashtionError::StaticBlocked(detail));
-            }
-            Severity::Caution => {
-                log_stderr(
-                    "[Bashtion] CAUTION: Potentially risky pattern detected."
-                        .to_string()
-                        .yellow()
-                        .to_string(),
-                )?;
-                log_stderr(
-                    format!("[Bashtion] Rule: {rule}; Detail: {detail}")
-                        .to_string()
-                        .yellow()
-                        .to_string(),
-                )?;
+    let static_findings = static_analyze(&script)?;
+    log_static_findings(&static_findings)?;
 
-                if !config.allow_caution {
-                    log_stderr(
-                            "[Bashtion] To proceed despite caution, rerun with --allow-caution or BASHTION_ALLOW_CAUTION=1"
-                                .to_string()
-                                .yellow()
-                                .to_string(),
-                        )?;
-                    return Err(BashtionError::StaticCaution(detail));
-                }
-            }
-        },
-    }
-
-    let base_missing = config.base_url.is_none();
-
-    if base_missing {
+    let semantic_verdict = if config.base_url.is_some() {
+        let verdict = semantic_analyze(&script, &config).await?;
+        log_semantic_report(&verdict)?;
+        Some(verdict)
+    } else {
         log_stderr(
             "[Bashtion] AI analysis skipped (no BASHTION_OPENAI_BASE_URL set)."
                 .to_string()
                 .yellow()
                 .to_string(),
         )?;
-    } else {
-        let verdict = semantic_analyze(&script, &config).await?;
-        match classify_semantic(&verdict) {
-            SemanticDisposition::Pass => log_semantic_pass(&verdict)?,
-            SemanticDisposition::Caution => log_semantic_caution(&verdict)?,
-            SemanticDisposition::Block => {
-                log_semantic_block(&verdict)?;
-                return Err(BashtionError::SemanticBlocked(block_error_message(
-                    &verdict,
-                )));
-            }
-        }
-    }
+        None
+    };
+
+    let intent_summary = semantic_verdict
+        .as_ref()
+        .map(|v| v.summary.clone())
+        .unwrap_or_else(|| "AI analysis unavailable; review findings carefully.".to_string());
 
     if config.auto_exec {
-        let shell = config.exec_shell.as_deref().unwrap_or("/bin/bash");
-        log_stderr(
-            format!(
-                "[Bashtion] Executing script via {shell} (override with --exec-shell or BASHTION_EXEC_SHELL)."
-            )
-            .green()
-            .to_string(),
-        )?;
-        exec_script(&script, shell)?;
+        if confirm_execution(&intent_summary)? {
+            let shell = config.exec_shell.as_deref().unwrap_or("/bin/bash");
+            log_stderr(
+                format!(
+                    "[Bashtion] Executing script via {shell} (override with --exec-shell or BASHTION_EXEC_SHELL)."
+                )
+                .green()
+                .to_string(),
+            )?;
+            exec_script(&script, shell)?;
+        } else {
+            log_stderr(
+                "[Bashtion] Execution cancelled by user."
+                    .to_string()
+                    .yellow()
+                    .to_string(),
+            )?;
+        }
     } else {
+        log_stderr(
+            "[Bashtion] Auto-execution disabled (--no-exec). Writing script to stdout."
+                .to_string()
+                .yellow()
+                .to_string(),
+        )?;
         print!("{}", script);
         std::io::stdout().flush().ok();
     }
+
     Ok(())
 }
 
@@ -146,103 +106,101 @@ fn exec_script(script: &str, shell: &str) -> Result<(), BashtionError> {
     Ok(())
 }
 
-fn log_semantic_pass(verdict: &LlmVerdict) -> Result<(), BashtionError> {
-    log_stderr(
-        format!("[Bashtion] AI analysis passed: {}", verdict.summary)
-            .green()
-            .to_string(),
-    )?;
-
-    if !verdict.findings.is_empty() {
-        log_findings(&verdict.findings)?;
-    }
-
-    Ok(())
-}
-
-fn log_semantic_block(verdict: &LlmVerdict) -> Result<(), BashtionError> {
-    log_stderr(
-        "[Bashtion] ALERT: AI analysis blocked the script."
-            .to_string()
-            .red()
-            .to_string(),
-    )?;
-    log_stderr(
-        format!("[Bashtion] Summary: {}", verdict.summary)
-            .to_string()
-            .red()
-            .to_string(),
-    )?;
-    if verdict.findings.is_empty() {
-        log_stderr(
-            "[Bashtion] (Model returned no granular findings.)"
+fn log_static_findings(findings: &[StaticFinding]) -> Result<(), BashtionError> {
+    if findings.is_empty() {
+        return log_stderr(
+            "[Bashtion] Static analysis found no issues."
                 .to_string()
-                .yellow()
+                .green()
                 .to_string(),
-        )?;
-    } else {
-        log_findings(&verdict.findings)?;
+        );
     }
-    Ok(())
-}
 
-fn log_semantic_caution(verdict: &LlmVerdict) -> Result<(), BashtionError> {
     log_stderr(
-        "[Bashtion] CAUTION: AI analysis flagged potential risks."
-            .to_string()
-            .yellow()
-            .to_string(),
+        format!(
+            "[Bashtion] Static analysis reported {} finding(s).",
+            findings.len()
+        )
+        .yellow()
+        .to_string(),
     )?;
-    log_stderr(
-        format!("[Bashtion] Summary: {}", verdict.summary)
-            .to_string()
-            .yellow()
-            .to_string(),
-    )?;
-    if verdict.findings.is_empty() {
-        log_stderr(
-            "[Bashtion] (Model returned no granular findings.)"
-                .to_string()
-                .yellow()
-                .to_string(),
-        )?;
-    } else {
-        log_findings(&verdict.findings)?;
-    }
-    log_stderr(
-        "[Bashtion] Proceeding because semantic caution is advisory."
-            .to_string()
-            .yellow()
-            .to_string(),
-    )?;
-    Ok(())
-}
 
-fn log_findings(findings: &[LlmFinding]) -> Result<(), BashtionError> {
     for (idx, finding) in findings.iter().enumerate() {
-        let severity_label = finding.severity.trim();
-        let severity_text = if severity_label.is_empty() {
-            "info"
+        let heading = format!(
+            "[Bashtion] Static Finding #{idx}: {rule} [{severity}]",
+            idx = idx + 1,
+            rule = finding.rule,
+            severity = match finding.severity {
+                StaticSeverity::Block => "HIGH",
+                StaticSeverity::Caution => "CAUTION",
+            }
+        );
+        let colored = match finding.severity {
+            StaticSeverity::Block => heading.red().to_string(),
+            StaticSeverity::Caution => heading.yellow().to_string(),
+        };
+        log_stderr(colored)?;
+        log_stderr(format!("          Detail: {}", finding.detail))?;
+    }
+
+    Ok(())
+}
+
+fn log_semantic_report(verdict: &LlmVerdict) -> Result<(), BashtionError> {
+    log_stderr(
+        format!("[Bashtion] AI intent summary: {}", verdict.summary)
+            .cyan()
+            .to_string(),
+    )?;
+
+    if verdict.findings.is_empty() {
+        log_stderr(
+            "[Bashtion] AI analysis reported no additional findings."
+                .to_string()
+                .green()
+                .to_string(),
+        )?;
+    } else {
+        log_stderr(
+            format!(
+                "[Bashtion] AI analysis reported {} finding(s).",
+                verdict.findings.len()
+            )
+            .yellow()
+            .to_string(),
+        )?;
+        log_llm_findings(&verdict.findings)?;
+    }
+
+    Ok(())
+}
+
+fn log_llm_findings(findings: &[LlmFinding]) -> Result<(), BashtionError> {
+    for (idx, finding) in findings.iter().enumerate() {
+        let severity = finding.severity.trim();
+        let level = if severity.is_empty() {
+            "INFO".to_string()
         } else {
-            severity_label
+            severity.to_ascii_uppercase()
         };
         let heading = format!(
-            "[Bashtion] Finding #{idx}: {title} [{severity}]",
+            "[Bashtion] AI Finding #{idx}: {title} [{level}]",
             idx = idx + 1,
-            title = finding.title.trim(),
-            severity = severity_text.to_ascii_uppercase()
+            title = finding.title.trim()
         );
-        log_stderr(colorize_by_severity(heading, severity_text))?;
-
-        let explanation = finding.explanation.trim();
-        if !explanation.is_empty() {
-            log_stderr(format!("          Detail: {explanation}"))?;
+        let colored = match level.as_str() {
+            "HIGH" => heading.red().to_string(),
+            "MEDIUM" => heading.yellow().to_string(),
+            "LOW" => heading.green().to_string(),
+            _ => heading.cyan().to_string(),
+        };
+        log_stderr(colored)?;
+        if !finding.explanation.trim().is_empty() {
+            log_stderr(format!("          Detail: {}", finding.explanation.trim()))?;
         }
-
-        let code = finding.code.trim();
-        if !code.is_empty() {
-            log_stderr("          Code:")?;
-            for line in code.lines() {
+        if !finding.code.trim().is_empty() {
+            log_stderr("          Code:".to_string())?;
+            for line in finding.code.lines() {
                 log_stderr(format!("            {line}"))?;
             }
         }
@@ -250,42 +208,40 @@ fn log_findings(findings: &[LlmFinding]) -> Result<(), BashtionError> {
     Ok(())
 }
 
-fn colorize_by_severity(message: String, severity: &str) -> String {
-    match severity.to_ascii_lowercase().as_str() {
-        "high" => message.red().to_string(),
-        "medium" => message.yellow().to_string(),
-        "low" => message.green().to_string(),
-        _ => message.cyan().to_string(),
-    }
-}
+fn confirm_execution(intent: &str) -> Result<bool, BashtionError> {
+    log_stderr(
+        format!("[Bashtion] Script intent: {intent}")
+            .to_string()
+            .white()
+            .to_string(),
+    )?;
 
-fn block_error_message(verdict: &LlmVerdict) -> String {
-    if verdict.findings.is_empty() {
-        return verdict.summary.clone();
-    }
+    let mut stderr = std::io::stderr();
+    stderr
+        .write_all(b"[Bashtion] Proceed with executing the script? [y/N]: ")
+        .map_err(BashtionError::Io)?;
+    stderr.flush().map_err(BashtionError::Io)?;
 
-    let highlights: Vec<String> = verdict
-        .findings
-        .iter()
-        .map(|f| format!("{} [{}]", f.title.trim(), f.severity.trim()))
-        .collect();
-    format!("{} | Findings: {}", verdict.summary, highlights.join(", "))
-}
-
-enum SemanticDisposition {
-    Pass,
-    Caution,
-    Block,
-}
-
-fn classify_semantic(verdict: &LlmVerdict) -> SemanticDisposition {
-    if verdict.safe {
-        return SemanticDisposition::Pass;
+    let mut reader = confirmation_reader()?;
+    let mut input = String::new();
+    let bytes = reader.read_line(&mut input).map_err(BashtionError::Io)?;
+    if bytes == 0 {
+        log_stderr(
+            "[Bashtion] No response detected; cancelling execution."
+                .to_string()
+                .yellow()
+                .to_string(),
+        )?;
+        return Ok(false);
     }
 
-    match max_finding_severity(verdict) {
-        Some(FindingSeverity::Low) => SemanticDisposition::Caution,
-        Some(FindingSeverity::Medium) | Some(FindingSeverity::High) => SemanticDisposition::Block,
-        Some(FindingSeverity::Unknown) | None => SemanticDisposition::Block,
+    let normalized = input.trim().to_ascii_lowercase();
+    Ok(matches!(normalized.as_str(), "y" | "yes"))
+}
+
+fn confirmation_reader() -> Result<Box<dyn BufRead>, BashtionError> {
+    match File::open("/dev/tty") {
+        Ok(file) => Ok(Box::new(BufReader::new(file))),
+        Err(_) => Ok(Box::new(BufReader::new(std::io::stdin()))),
     }
 }
