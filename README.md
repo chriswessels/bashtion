@@ -131,7 +131,3 @@ Each contains a single `bashtion` binary. SHA256 files are provided for integrit
 ## 📄 License
 
 Bashtion is MIT-licensed. See [LICENSE](LICENSE) for details.
-
-## 🙏 Acknowledgments
-
-Inspired by projects like Nomnom and LIGMA that focus on safe, AI-friendly tooling for developers.
