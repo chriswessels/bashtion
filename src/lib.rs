@@ -17,6 +17,7 @@ use semantic::{analyze as semantic_analyze, LlmFinding, LlmVerdict};
 use static_analysis::{analyze as static_analyze, Severity as StaticSeverity, StaticFinding};
 
 pub async fn run(config: ResolvedConfig) -> Result<(), BashtionError> {
+    log_version()?;
     let script = io::read_stdin_limited(config.buffer_limit)?;
     log_stderr(format!(
         "[Bashtion] Buffer read ({:.1} KB).",
@@ -40,13 +41,34 @@ pub async fn run(config: ResolvedConfig) -> Result<(), BashtionError> {
         None
     };
 
-    let intent_summary = semantic_verdict
+    if semantic_verdict.is_none() {
+        log_stderr(
+            "[Bashtion] AI analysis unavailable; review findings carefully."
+                .to_string()
+                .yellow()
+                .to_string(),
+        )?;
+    }
+
+    let static_count = static_findings.len();
+    let (risk_level, ai_count) = semantic_verdict
         .as_ref()
-        .map(|v| v.intent.clone())
-        .unwrap_or_else(|| "AI analysis unavailable; review findings carefully.".to_string());
+        .map(|v| (v.risk.clone(), v.findings.len()))
+        .unwrap_or_else(|| ("n/a".to_string(), 0));
+    log_summary(static_count, &risk_level, ai_count)?;
+
+    if let Some(verdict) = semantic_verdict.as_ref() {
+        log_stderr(
+            format!("[Bashtion] Intent: {}", verdict.intent)
+                .to_string()
+                .blue()
+                .bold()
+                .to_string(),
+        )?;
+    }
 
     if config.auto_exec {
-        if confirm_execution(&intent_summary)? {
+        if confirm_execution()? {
             let shell = config.exec_shell.as_deref().unwrap_or("/bin/bash");
             log_stderr(
                 format!(
@@ -141,23 +163,31 @@ fn log_static_findings(findings: &[StaticFinding]) -> Result<(), BashtionError> 
         };
         log_stderr(colored)?;
         log_stderr(format!("          Detail: {}", finding.detail))?;
+        if let Some(snippet) = finding.snippet.as_deref() {
+            if snippet.lines().count() == 1 {
+                log_stderr(format!("          Code: {}", snippet.trim()))?;
+            } else {
+                log_stderr("          Code:".to_string())?;
+                for line in snippet.lines() {
+                    log_stderr(format!("            {line}"))?;
+                }
+            }
+        }
     }
 
     Ok(())
 }
 
 fn log_semantic_report(verdict: &LlmVerdict) -> Result<(), BashtionError> {
-    log_stderr(
-        format!("[Bashtion] AI intent: {}", verdict.intent)
-            .cyan()
-            .to_string(),
-    )?;
-    log_stderr(
-        format!("[Bashtion] Overall AI risk: {}", verdict.risk)
-            .to_string()
-            .yellow()
-            .to_string(),
-    )?;
+    let risk_label = verdict.risk.trim().to_ascii_lowercase();
+    let risk_line = format!("[Bashtion] Overall AI risk: {}", verdict.risk);
+    let colored_risk = match risk_label.as_str() {
+        "low" => risk_line.green().to_string(),
+        "medium" => risk_line.yellow().to_string(),
+        "high" => risk_line.red().to_string(),
+        _ => risk_line.cyan().to_string(),
+    };
+    log_stderr(colored_risk)?;
 
     if verdict.findings.is_empty() {
         log_stderr(
@@ -179,6 +209,20 @@ fn log_semantic_report(verdict: &LlmVerdict) -> Result<(), BashtionError> {
     }
 
     Ok(())
+}
+
+fn log_summary(static_count: usize, risk: &str, ai_count: usize) -> Result<(), BashtionError> {
+    let risk_label = risk.trim().to_ascii_lowercase();
+    let summary_line = format!(
+        "[Bashtion] Summary: Static {static_count} finding(s) | AI risk {risk} ({ai_count} finding(s))"
+    );
+    let colored = match risk_label.as_str() {
+        "low" => summary_line.green().to_string(),
+        "medium" => summary_line.yellow().to_string(),
+        "high" => summary_line.red().to_string(),
+        _ => summary_line.cyan().to_string(),
+    };
+    log_stderr(colored)
 }
 
 fn log_llm_findings(findings: &[LlmFinding]) -> Result<(), BashtionError> {
@@ -205,23 +249,20 @@ fn log_llm_findings(findings: &[LlmFinding]) -> Result<(), BashtionError> {
             log_stderr(format!("          Detail: {}", finding.explanation.trim()))?;
         }
         if !finding.code.trim().is_empty() {
-            log_stderr("          Code:".to_string())?;
-            for line in finding.code.lines() {
-                log_stderr(format!("            {line}"))?;
+            if finding.code.lines().count() == 1 {
+                log_stderr(format!("          Code: {}", finding.code.trim()))?;
+            } else {
+                log_stderr("          Code:".to_string())?;
+                for line in finding.code.lines() {
+                    log_stderr(format!("            {line}"))?;
+                }
             }
         }
     }
     Ok(())
 }
 
-fn confirm_execution(intent: &str) -> Result<bool, BashtionError> {
-    log_stderr(
-        format!("[Bashtion] Script intent: {intent}")
-            .to_string()
-            .white()
-            .to_string(),
-    )?;
-
+fn confirm_execution() -> Result<bool, BashtionError> {
     let mut stderr = std::io::stderr();
     stderr
         .write_all(b"[Bashtion] Proceed with executing the script? [y/N]: ")
@@ -250,4 +291,18 @@ fn confirmation_reader() -> Result<Box<dyn BufRead>, BashtionError> {
         Ok(file) => Ok(Box::new(BufReader::new(file))),
         Err(_) => Ok(Box::new(BufReader::new(std::io::stdin()))),
     }
+}
+
+fn log_version() -> Result<(), BashtionError> {
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
+    let git = option_env!("VERGEN_GIT_DESCRIBE")
+        .or(option_env!("VERGEN_GIT_SHA"))
+        .unwrap_or("unknown");
+    let build_ts = option_env!("VERGEN_BUILD_TIMESTAMP").unwrap_or("unknown time");
+    log_stderr(
+        format!("[Bashtion] Version {VERSION} ({git}) built {build_ts}")
+            .to_string()
+            .cyan()
+            .to_string(),
+    )
 }

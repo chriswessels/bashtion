@@ -15,6 +15,7 @@ pub struct StaticFinding {
     pub rule: &'static str,
     pub detail: String,
     pub severity: Severity,
+    pub snippet: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +92,7 @@ fn rule_dangerous_commands(script: &str, root: Node) -> Result<Vec<StaticFinding
                 rule: "eval",
                 detail: "Dynamic execution via eval".to_string(),
                 severity: Severity::Block,
+                snippet: Some(node_text(command, script)),
             });
             continue;
         }
@@ -100,6 +102,7 @@ fn rule_dangerous_commands(script: &str, root: Node) -> Result<Vec<StaticFinding
                 rule: "base64_decode",
                 detail: "Obfuscation via base64 decode".to_string(),
                 severity: Severity::Block,
+                snippet: Some(node_text(command, script)),
             });
             continue;
         }
@@ -111,6 +114,7 @@ fn rule_dangerous_commands(script: &str, root: Node) -> Result<Vec<StaticFinding
                     rule: "openssl_decode",
                     detail: "Obfuscation via openssl enc -d".to_string(),
                     severity: Severity::Block,
+                    snippet: Some(node_text(command, script)),
                 });
                 continue;
             }
@@ -121,6 +125,7 @@ fn rule_dangerous_commands(script: &str, root: Node) -> Result<Vec<StaticFinding
                 rule: "netcat_like",
                 detail: format!("Network backdoor tool detected: {name}"),
                 severity: Severity::Block,
+                snippet: Some(node_text(command, script)),
             });
             continue;
         }
@@ -133,6 +138,7 @@ fn rule_dangerous_commands(script: &str, root: Node) -> Result<Vec<StaticFinding
                     rule: "rm_root",
                     detail: "Destructive command 'rm -rf /'".to_string(),
                     severity: Severity::Block,
+                    snippet: Some(node_text(command, script)),
                 });
             }
         }
@@ -157,6 +163,7 @@ fn rule_dev_tcp(script: &str, root: Node) -> Result<Vec<StaticFinding>, Bashtion
                     rule: "dev_tcp",
                     detail: "Network backdoor via /dev/tcp detected".to_string(),
                     severity: Severity::Block,
+                    snippet: Some(text),
                 });
             }
         }
@@ -184,6 +191,7 @@ fn rule_pipeline_curl_shell(script: &str, root: Node) -> Result<Vec<StaticFindin
                 rule: "curl_pipeline",
                 detail: "curl|wget piped to bash/sh".to_string(),
                 severity: Severity::Caution,
+                snippet: Some(node_text(node, script)),
             });
         }
 
@@ -274,6 +282,7 @@ fn command_python_reverse_shell(command: Node, script: &str) -> Option<StaticFin
             rule: "python_reverse_shell",
             detail: "Python reverse shell detected".to_string(),
             severity: Severity::Block,
+            snippet: Some(node_text(command, script)),
         });
     }
     None
@@ -290,6 +299,7 @@ fn command_sudo_chmod(command: Node, script: &str) -> Option<StaticFinding> {
             rule: "sudo_chmod_setuid",
             detail: "Priv-escalation via sudo chmod on shell".to_string(),
             severity: Severity::Block,
+            snippet: Some(node_text(command, script)),
         });
     }
     None
