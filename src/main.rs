@@ -39,6 +39,10 @@ struct Cli {
     /// Disable colored stderr output (env: BASHTION_NO_COLOR)
     #[arg(long, env = "BASHTION_NO_COLOR", default_value_t = false)]
     no_color: bool,
+
+    /// Allow scripts that trigger caution (soft) rules (env: BASHTION_ALLOW_CAUTION)
+    #[arg(long, env = "BASHTION_ALLOW_CAUTION", default_value_t = false)]
+    allow_caution: bool,
 }
 
 #[tokio::main]
@@ -72,6 +76,7 @@ async fn entrypoint() -> Result<(), BashtionError> {
         base_url,
         Duration::from_secs(cli.timeout_secs),
         cli.buffer_limit,
+        cli.allow_caution,
     );
 
     run(config).await

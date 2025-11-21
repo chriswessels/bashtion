@@ -12,7 +12,7 @@ use config::Config;
 use error::BashtionError;
 use logging::log_stderr;
 use semantic::analyze as semantic_analyze;
-use static_analysis::{analyze as static_analyze, BlockReason, Verdict as StaticVerdict};
+use static_analysis::{analyze as static_analyze, BlockReason, Severity, Verdict as StaticVerdict};
 
 pub async fn run(config: Config) -> Result<(), BashtionError> {
     let script = io::read_stdin_limited(config.buffer_limit)?;
@@ -28,21 +28,51 @@ pub async fn run(config: Config) -> Result<(), BashtionError> {
                 .green()
                 .to_string(),
         )?,
-        StaticVerdict::Blocked(BlockReason { rule, detail }) => {
-            log_stderr(
-                "[Bashtion] ALERT: Static analysis failed."
-                    .to_string()
-                    .red()
-                    .to_string(),
-            )?;
-            log_stderr(
-                format!("[Bashtion] Rule: {rule}; Reason: {detail}")
-                    .to_string()
-                    .red()
-                    .to_string(),
-            )?;
-            return Err(BashtionError::StaticBlocked(detail));
-        }
+        StaticVerdict::Flagged(BlockReason {
+            rule,
+            detail,
+            severity,
+        }) => match severity {
+            Severity::Block => {
+                log_stderr(
+                    "[Bashtion] ALERT: Static analysis failed."
+                        .to_string()
+                        .red()
+                        .to_string(),
+                )?;
+                log_stderr(
+                    format!("[Bashtion] Rule: {rule}; Reason: {detail}")
+                        .to_string()
+                        .red()
+                        .to_string(),
+                )?;
+                return Err(BashtionError::StaticBlocked(detail));
+            }
+            Severity::Caution => {
+                log_stderr(
+                    "[Bashtion] CAUTION: Potentially risky pattern detected."
+                        .to_string()
+                        .yellow()
+                        .to_string(),
+                )?;
+                log_stderr(
+                    format!("[Bashtion] Rule: {rule}; Detail: {detail}")
+                        .to_string()
+                        .yellow()
+                        .to_string(),
+                )?;
+
+                if !config.allow_caution {
+                    log_stderr(
+                            "[Bashtion] To proceed despite caution, rerun with --allow-caution or BASHTION_ALLOW_CAUTION=1"
+                                .to_string()
+                                .yellow()
+                                .to_string(),
+                        )?;
+                    return Err(BashtionError::StaticCaution(detail));
+                }
+            }
+        },
     }
 
     let verdict = semantic_analyze(&script, &config).await?;

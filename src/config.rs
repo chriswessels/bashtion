@@ -9,6 +9,7 @@ pub struct Config {
     pub base_url: Url,
     pub timeout: Duration,
     pub buffer_limit: usize,
+    pub allow_caution: bool,
 }
 
 impl Config {
@@ -18,6 +19,7 @@ impl Config {
         base_url: Url,
         timeout: Duration,
         buffer_limit: usize,
+        allow_caution: bool,
     ) -> Self {
         Self {
             api_key,
@@ -25,6 +27,7 @@ impl Config {
             base_url,
             timeout,
             buffer_limit,
+            allow_caution,
         }
     }
 }

@@ -4,6 +4,8 @@ pub enum BashtionError {
     Io(#[from] std::io::Error),
     #[error("Static analysis blocked: {0}")]
     StaticBlocked(String),
+    #[error("Static analysis caution: {0}")]
+    StaticCaution(String),
     #[error("Semantic analysis blocked: {0}")]
     SemanticBlocked(String),
     #[error("Semantic analysis failed: {0}")]
