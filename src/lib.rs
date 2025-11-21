@@ -42,7 +42,7 @@ pub async fn run(config: ResolvedConfig) -> Result<(), BashtionError> {
 
     let intent_summary = semantic_verdict
         .as_ref()
-        .map(|v| v.summary.clone())
+        .map(|v| v.intent.clone())
         .unwrap_or_else(|| "AI analysis unavailable; review findings carefully.".to_string());
 
     if config.auto_exec {
@@ -148,8 +148,14 @@ fn log_static_findings(findings: &[StaticFinding]) -> Result<(), BashtionError> 
 
 fn log_semantic_report(verdict: &LlmVerdict) -> Result<(), BashtionError> {
     log_stderr(
-        format!("[Bashtion] AI intent summary: {}", verdict.summary)
+        format!("[Bashtion] AI intent: {}", verdict.intent)
             .cyan()
+            .to_string(),
+    )?;
+    log_stderr(
+        format!("[Bashtion] Overall AI risk: {}", verdict.risk)
+            .to_string()
+            .yellow()
             .to_string(),
     )?;
 

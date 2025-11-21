@@ -11,30 +11,28 @@ use crate::config::ResolvedConfig;
 use crate::error::BashtionError;
 use crate::logging::log_stderr;
 
-const SYSTEM_PROMPT: &str = r#"You are a cybersecurity expert analyzing a shell script that the user wants to pipe directly into a shell. Provide actionable evidence when you find malicious or risky behavior.
+const SYSTEM_PROMPT: &str = r#"You are a cybersecurity analyst reviewing a shell script the user plans to execute. Describe what the script intends to do, highlight risks, and stay objective.
 
-Output JSON **only**. The JSON must match exactly:
+Respond with JSON ONLY in this exact shape:
 {
-  "safe": boolean,
-  "summary": "Short sentence explaining the overall decision",
+  "intent": "Concise description of the script's overall behavior",
+  "risk": "low|medium|high",
   "findings": [
     {
-      "title": "One-line title for the issue",
+      "title": "One-line issue description",
       "severity": "low|medium|high",
-      "explanation": "Detailed reasoning that references the script's behavior",
+      "explanation": "Specific reasoning with references to concrete commands",
       "code": "Exact snippet(s) copied verbatim from the script"
     }
   ]
 }
 
-Rules:
-- If safe=false, include at least one finding with concrete shell commands or code responsible for the risk.
-- The code field must quote the relevant lines exactly as they appear; do not paraphrase or use ellipses.
-- Mention outbound network hosts, file paths, privilege escalation, and any obfuscation that influences the decision.
-- If safe=true, you may return an empty findings array or list benign behaviors.
-- Downloading artifacts with curl/wget into local files **without executing them** (no piping to shells, no chmod+run, no sourcing) is SAFE. You may record a LOW severity finding, but `safe` must remain true.
-- Mark unsafe only when the script executes or installs remote code, modifies sensitive files, escalates privileges, or exfiltrates data.
-- Never include markdown code fences or commentary outside the JSON document."#;
+Guidance:
+- Risk reflects the most severe behavior present. Use LOW when the script only downloads/installers without executing them or performs common setup tasks. Use MEDIUM for potentially dangerous patterns requiring attention. Use HIGH for confirmed malicious activity (remote execution, privilege escalation, exfiltration, destructive operations).
+- The code field must quote the exact lines responsible for each finding (no ellipses, no paraphrasing).
+- Mention outbound hosts, file paths, privilege escalation, and obfuscation whenever relevant.
+- If there are no concerning behaviors beyond benign downloads, return risk="low" and either an empty findings array or informational LOW findings.
+- Never include markdown fences or extra commentary outside the JSON document."#;
 
 const MAX_LLM_ATTEMPTS: usize = 3;
 
@@ -45,9 +43,10 @@ const RETRY_BASE_DELAY_MS: u64 = 200;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct LlmVerdict {
-    pub safe: bool,
-    #[serde(default = "default_summary", alias = "reason")]
-    pub summary: String,
+    #[serde(default = "default_intent", alias = "summary", alias = "reason")]
+    pub intent: String,
+    #[serde(default = "default_risk")]
+    pub risk: String,
     #[serde(default)]
     pub findings: Vec<LlmFinding>,
 }
@@ -184,8 +183,12 @@ async fn analyze_once(script: &str, config: &ResolvedConfig) -> Result<LlmVerdic
     Ok(verdict)
 }
 
-fn default_summary() -> String {
-    "Model did not return a summary".to_string()
+fn default_intent() -> String {
+    "Model did not return an intent description".to_string()
+}
+
+fn default_risk() -> String {
+    "unknown".to_string()
 }
 
 fn join_chat_url(base: &Url) -> Result<Url, BashtionError> {
@@ -397,7 +400,7 @@ mod tests {
     fn verdict_falls_back_to_reason_field() {
         let json = r#"{"safe":false,"reason":"bad","findings":[]}"#;
         let verdict: LlmVerdict = serde_json::from_str(json).unwrap();
-        assert_eq!(verdict.summary, "bad");
+        assert_eq!(verdict.intent, "bad");
     }
 
     #[test]
@@ -421,8 +424,8 @@ mod tests {
                     Err(AttemptError::retryable(format!("transient {current}")))
                 } else {
                     Ok(LlmVerdict {
-                        safe: true,
-                        summary: "ok".into(),
+                        intent: "ok".into(),
+                        risk: "low".into(),
                         findings: vec![],
                     })
                 }
@@ -432,7 +435,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(attempts, 3);
-        assert!(verdict.safe);
+        assert_eq!(verdict.intent, "ok");
     }
 
     #[tokio::test]
@@ -458,9 +461,9 @@ mod tests {
     #[test]
     fn repairs_truncated_llm_json() {
         let broken =
-            br#"{"safe":false,"summary":"bad","findings":[{"title":"Issue","severity":"high"}"#;
+            br#"{"summary":"bad","risk":"high","findings":[{"title":"Issue","severity":"high"}"#;
         let verdict: LlmVerdict = parse_json_bytes(broken, "test verdict").unwrap();
-        assert!(!verdict.safe);
+        assert_eq!(verdict.intent, "bad");
         assert_eq!(verdict.findings.len(), 1);
         assert_eq!(verdict.findings[0].title, "Issue");
     }
