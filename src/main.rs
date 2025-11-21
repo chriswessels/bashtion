@@ -14,7 +14,7 @@ use bashtion::{config::Config, error::BashtionError, run};
 struct Cli {
     /// OpenAI-compatible API key (env: OPENAI_API_KEY)
     #[arg(long, env = "OPENAI_API_KEY")]
-    api_key: String,
+    api_key: Option<String>,
 
     /// Model name (env: OPENAI_MODEL)
     #[arg(long, env = "OPENAI_MODEL", default_value = "gpt-4o")]
@@ -43,6 +43,10 @@ struct Cli {
     /// Allow scripts that trigger caution (soft) rules (env: BASHTION_ALLOW_CAUTION)
     #[arg(long, env = "BASHTION_ALLOW_CAUTION", default_value_t = false)]
     allow_caution: bool,
+
+    /// Automatically exec the validated script in the user's shell (env: BASHTION_AUTO_EXEC)
+    #[arg(long = "no-exec", env = "BASHTION_AUTO_EXEC", default_value_t = true, action = clap::ArgAction::SetFalse)]
+    auto_exec: bool,
 }
 
 #[tokio::main]
@@ -77,6 +81,7 @@ async fn entrypoint() -> Result<(), BashtionError> {
         Duration::from_secs(cli.timeout_secs),
         cli.buffer_limit,
         cli.allow_caution,
+        cli.auto_exec,
     );
 
     run(config).await

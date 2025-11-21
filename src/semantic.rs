@@ -50,11 +50,11 @@ struct ChatResponse {
 }
 
 pub async fn analyze(script: &str, config: &Config) -> Result<LlmVerdict, BashtionError> {
-    if config.api_key.trim().is_empty() {
-        return Err(BashtionError::SemanticError(
-            "OPENAI_API_KEY is required".into(),
-        ));
-    }
+    let api_key = config
+        .api_key
+        .as_ref()
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| BashtionError::SemanticError("OPENAI_API_KEY is required".into()))?;
 
     let client = Client::builder()
         .timeout(config.timeout)
@@ -84,7 +84,7 @@ pub async fn analyze(script: &str, config: &Config) -> Result<LlmVerdict, Bashti
 
     let response = client
         .post(url)
-        .bearer_auth(&config.api_key)
+        .bearer_auth(api_key)
         .json(&request)
         .send()
         .await
