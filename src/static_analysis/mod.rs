@@ -11,9 +11,15 @@ static DANGEROUS_COMMAND_QUERY: Lazy<Query> =
     Lazy::new(|| Query::new(&BASH_LANGUAGE, DANGEROUS_COMMAND).expect("valid query"));
 
 #[derive(Debug, PartialEq, Eq)]
+pub struct BlockReason {
+    pub rule: &'static str,
+    pub detail: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum Verdict {
     Pass,
-    Blocked(String),
+    Blocked(BlockReason),
 }
 
 pub fn analyze(script: &str) -> Result<Verdict, BashtionError> {
@@ -26,24 +32,24 @@ pub fn analyze(script: &str) -> Result<Verdict, BashtionError> {
         .parse(script, None)
         .ok_or_else(|| BashtionError::Other("Failed to parse script".into()))?;
 
-    if let Some(reason) = detect_command_threats(script, tree.root_node())? {
-        return Ok(Verdict::Blocked(reason));
-    }
+    let rules: &[fn(&str, Node) -> Result<Option<BlockReason>, BashtionError>] = &[
+        rule_dangerous_commands,
+        rule_dev_tcp,
+        rule_pipeline_curl_shell,
+        rule_python_reverse_shell,
+        rule_sudo_chmod_setuid_shell,
+    ];
 
-    if detect_dev_tcp(script, tree.root_node())? {
-        return Ok(Verdict::Blocked(
-            "Network backdoor via /dev/tcp detected".to_string(),
-        ));
-    }
-
-    if let Some(reason) = detect_additional_threats(script, tree.root_node())? {
-        return Ok(Verdict::Blocked(reason));
+    for rule in rules {
+        if let Some(reason) = rule(script, tree.root_node())? {
+            return Ok(Verdict::Blocked(reason));
+        }
     }
 
     Ok(Verdict::Pass)
 }
 
-fn detect_command_threats(script: &str, root: Node) -> Result<Option<String>, BashtionError> {
+fn rule_dangerous_commands(script: &str, root: Node) -> Result<Option<BlockReason>, BashtionError> {
     let mut cursor = QueryCursor::new();
     let cmd_name_idx = DANGEROUS_COMMAND_QUERY
         .capture_index_for_name("cmd_name")
@@ -78,29 +84,44 @@ fn detect_command_threats(script: &str, root: Node) -> Result<Option<String>, Ba
         let args = collect_arguments(command, script);
 
         if name == "eval" {
-            return Ok(Some("Dynamic execution via eval".to_string()));
+            return Ok(Some(BlockReason {
+                rule: "eval",
+                detail: "Dynamic execution via eval".to_string(),
+            }));
         }
 
         if name == "base64" && has_flag_any(&args, &["-d", "--decode"]) {
-            return Ok(Some("Obfuscation via base64 decode".to_string()));
+            return Ok(Some(BlockReason {
+                rule: "base64_decode",
+                detail: "Obfuscation via base64 decode".to_string(),
+            }));
         }
 
         if name == "openssl" {
             let has_enc = args.iter().any(|a| a == "enc");
             if has_enc && has_flag_any(&args, &["-d", "--decode"]) {
-                return Ok(Some("Obfuscation via openssl enc -d".to_string()));
+                return Ok(Some(BlockReason {
+                    rule: "openssl_decode",
+                    detail: "Obfuscation via openssl enc -d".to_string(),
+                }));
             }
         }
 
         if matches!(name.as_str(), "nc" | "netcat" | "telnet") {
-            return Ok(Some(format!("Network backdoor tool detected: {}", name)));
+            return Ok(Some(BlockReason {
+                rule: "netcat_like",
+                detail: format!("Network backdoor tool detected: {}", name),
+            }));
         }
 
         if name == "rm" {
             let destructive_flag = args.iter().any(|a| a == "-rf" || a == "-fr");
             let targeting_root = args.iter().any(|a| a == "/");
             if destructive_flag && targeting_root {
-                return Ok(Some("Destructive command 'rm -rf /'".to_string()));
+                return Ok(Some(BlockReason {
+                    rule: "rm_root",
+                    detail: "Destructive command 'rm -rf /'".to_string(),
+                }));
             }
         }
     }
@@ -108,7 +129,7 @@ fn detect_command_threats(script: &str, root: Node) -> Result<Option<String>, Ba
     Ok(None)
 }
 
-fn detect_dev_tcp(script: &str, root: Node) -> Result<bool, BashtionError> {
+fn rule_dev_tcp(script: &str, root: Node) -> Result<Option<BlockReason>, BashtionError> {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let kind = node.kind();
@@ -117,7 +138,10 @@ fn detect_dev_tcp(script: &str, root: Node) -> Result<bool, BashtionError> {
         }
 
         if kind == "word" && node_text(node, script).contains("/dev/tcp/") {
-            return Ok(true);
+            return Ok(Some(BlockReason {
+                rule: "dev_tcp",
+                detail: "Network backdoor via /dev/tcp detected".to_string(),
+            }));
         }
 
         let mut cursor = node.walk();
@@ -126,10 +150,13 @@ fn detect_dev_tcp(script: &str, root: Node) -> Result<bool, BashtionError> {
         }
     }
 
-    Ok(false)
+    Ok(None)
 }
 
-fn detect_additional_threats(script: &str, root: Node) -> Result<Option<String>, BashtionError> {
+fn rule_pipeline_curl_shell(
+    script: &str,
+    root: Node,
+) -> Result<Option<BlockReason>, BashtionError> {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let kind = node.kind();
@@ -138,11 +165,34 @@ fn detect_additional_threats(script: &str, root: Node) -> Result<Option<String>,
         }
 
         if kind == "pipeline" && pipeline_curl_to_shell(node, script) {
-            return Ok(Some("curl|wget piped to bash/sh".to_string()));
+            return Ok(Some(BlockReason {
+                rule: "curl_pipeline",
+                detail: "curl|wget piped to bash/sh".to_string(),
+            }));
+        }
+
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+
+    Ok(None)
+}
+
+fn rule_python_reverse_shell(
+    script: &str,
+    root: Node,
+) -> Result<Option<BlockReason>, BashtionError> {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let kind = node.kind();
+        if kind == "comment" || kind == "string" {
+            continue;
         }
 
         if kind == "command" {
-            if let Some(reason) = command_priv_or_reverse_shell(node, script) {
+            if let Some(reason) = command_python_reverse_shell(node, script) {
                 return Ok(Some(reason));
             }
         }
@@ -152,7 +202,31 @@ fn detect_additional_threats(script: &str, root: Node) -> Result<Option<String>,
             stack.push(child);
         }
     }
+    Ok(None)
+}
 
+fn rule_sudo_chmod_setuid_shell(
+    script: &str,
+    root: Node,
+) -> Result<Option<BlockReason>, BashtionError> {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let kind = node.kind();
+        if kind == "comment" || kind == "string" {
+            continue;
+        }
+
+        if kind == "command" {
+            if let Some(reason) = command_sudo_chmod(node, script) {
+                return Ok(Some(reason));
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
     Ok(None)
 }
 
@@ -171,22 +245,33 @@ fn pipeline_curl_to_shell(node: Node, script: &str) -> bool {
         && matches!(last.as_deref(), Some("bash") | Some("sh"))
 }
 
-fn command_priv_or_reverse_shell(command: Node, script: &str) -> Option<String> {
+fn command_python_reverse_shell(command: Node, script: &str) -> Option<BlockReason> {
     let name = get_command_name(&command, script)?;
+    if !matches!(name.as_str(), "python" | "python3") {
+        return None;
+    }
     let args = collect_arguments(command, script);
-
-    if matches!(name.as_str(), "python" | "python3") {
-        if is_python_reverse_shell(&args) {
-            return Some("Python reverse shell detected".to_string());
-        }
+    if is_python_reverse_shell(&args) {
+        return Some(BlockReason {
+            rule: "python_reverse_shell",
+            detail: "Python reverse shell detected".to_string(),
+        });
     }
+    None
+}
 
-    if name == "sudo" {
-        if is_sudo_chmod_priv_escalation(&args) {
-            return Some("Priv-escalation via sudo chmod on shell".to_string());
-        }
+fn command_sudo_chmod(command: Node, script: &str) -> Option<BlockReason> {
+    let name = get_command_name(&command, script)?;
+    if name != "sudo" {
+        return None;
     }
-
+    let args = collect_arguments(command, script);
+    if is_sudo_chmod_priv_escalation(&args) {
+        return Some(BlockReason {
+            rule: "sudo_chmod_setuid",
+            detail: "Priv-escalation via sudo chmod on shell".to_string(),
+        });
+    }
     None
 }
 

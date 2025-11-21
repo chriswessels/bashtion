@@ -12,7 +12,7 @@ use config::Config;
 use error::BashtionError;
 use logging::log_stderr;
 use semantic::analyze as semantic_analyze;
-use static_analysis::{analyze as static_analyze, Verdict as StaticVerdict};
+use static_analysis::{analyze as static_analyze, BlockReason, Verdict as StaticVerdict};
 
 pub async fn run(config: Config) -> Result<(), BashtionError> {
     let script = io::read_stdin_limited(config.buffer_limit)?;
@@ -28,7 +28,7 @@ pub async fn run(config: Config) -> Result<(), BashtionError> {
                 .green()
                 .to_string(),
         )?,
-        StaticVerdict::Blocked(reason) => {
+        StaticVerdict::Blocked(BlockReason { rule, detail }) => {
             log_stderr(
                 "[Bashtion] ALERT: Static analysis failed."
                     .to_string()
@@ -36,12 +36,12 @@ pub async fn run(config: Config) -> Result<(), BashtionError> {
                     .to_string(),
             )?;
             log_stderr(
-                format!("[Bashtion] Reason: {}", reason)
+                format!("[Bashtion] Rule: {rule}; Reason: {detail}")
                     .to_string()
                     .red()
                     .to_string(),
             )?;
-            return Err(BashtionError::StaticBlocked(reason));
+            return Err(BashtionError::StaticBlocked(detail));
         }
     }
 
